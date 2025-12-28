@@ -1,0 +1,83 @@
+# HarmonyDB
+
+A Postgres adapter in harmony with developers.
+
+## Features
+
+- Rolling to secondary database servers on connection failure
+- Convenience features for Go + SQL
+- Prevention of SQL injection vulnerabilities
+- Monitors behavior via Prometheus stats and logging of errors
+
+## Installation
+
+```bash
+go get github.com/curiostorage/harmonydb
+```
+
+## Usage
+
+```go
+package main
+
+import (
+    "context"
+    "github.com/curiostorage/harmonydb"
+)
+
+func main() {
+    db, err := harmonydb.NewFromConfig(harmonydb.Config{
+        Hosts:       []string{"localhost"},
+        Username:    "yugabyte",
+        Password:    "yugabyte",
+        Database:    "yugabyte",
+        Port:        "5433",
+        LoadBalance: false,
+    })
+    if err != nil {
+        panic(err)
+    }
+
+    // Execute queries
+    ctx := context.Background()
+    
+    // Insert/Update/Delete
+    count, err := db.Exec(ctx, "INSERT INTO users (name) VALUES ($1)", "Alice")
+    
+    // Select into struct slice
+    var users []struct {
+        ID   int
+        Name string
+    }
+    err = db.Select(ctx, &users, "SELECT id, name FROM users")
+    
+    // Query single row
+    var name string
+    err = db.QueryRow(ctx, "SELECT name FROM users WHERE id = $1", 1).Scan(&name)
+    
+    // Transactions
+    committed, err := db.BeginTransaction(ctx, func(tx *harmonydb.Tx) (bool, error) {
+        _, err := tx.Exec("UPDATE users SET name = $1 WHERE id = $2", "Bob", 1)
+        if err != nil {
+            return false, err
+        }
+        return true, nil // commit
+    })
+}
+```
+
+## Schema Migrations
+
+SQL migrations are embedded in the package and automatically applied on connection.
+
+Place migration files in the `sql/` folder with naming convention: `YYYYMMDD-description.sql`
+
+Rules:
+- CREATE TABLE should NOT have a schema (managed automatically)
+- Never change shipped SQL files - create new files for corrections
+- All migrations run once in order
+
+## License
+
+MIT License - see [LICENSE](LICENSE) for details.
+
