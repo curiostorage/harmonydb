@@ -25,6 +25,16 @@ import (
     "github.com/curiostorage/harmonydb"
 )
 
+//go:embed sql
+var upgradeFS embed.FS
+
+//go:embed downgrade
+var downgradeFS embed.FS
+
+func init() {
+    harmonydb.Init(upgadeFS, downgradeFS)
+}
+
 func main() {
     db, err := harmonydb.NewFromConfig(harmonydb.Config{
         Hosts:       []string{"localhost"},
