@@ -63,23 +63,15 @@ type Config struct {
 
 	// SSL Mode for the connection
 	SSLMode string
-}
 
-// NewFromConfig is a convenience function.
-// In usage:
-//
-//	db, err := NewFromConfig(config.HarmonyDB)  // in binary init
-func NewFromConfig(cfg Config) (*DB, error) {
-	return New(
-		cfg.Hosts,
-		cfg.Username,
-		cfg.Password,
-		cfg.Database,
-		cfg.Port,
-		cfg.LoadBalance,
-		cfg.SSLMode,
-		"",
-	)
+	// Schema to use for the connection
+	Schema string
+
+	SqlEmbedFS *embed.FS
+
+	DowngradeEmbedFS *embed.FS
+
+	ITestID ITestID
 }
 
 func envElse(env, els string) string {
@@ -99,7 +91,6 @@ func NewFromConfigWithITestID(t *testing.T, id ITestID) (*DB, error) {
 		"yugabyte",
 		"5433",
 		false,
-		"",
 		id,
 	)
 	if err != nil {
@@ -116,8 +107,34 @@ var DefaultSchema = "curio"
 // New is to be called once per binary to establish the pool.
 // log() is for errors. It returns an upgraded database's connection.
 // This entry point serves both production and integration tests, so it's more DI.
-func New(hosts []string, username, password, database, port string, loadBalance bool, sslmode string, itestID ITestID) (*DB, error) {
-	itest := string(itestID)
+func New(hosts []string, username, password, database, port string, loadBalance bool, itestID ITestID) (*DB, error) {
+	return NewFromConfig(Config{
+		Hosts:       hosts,
+		Username:    username,
+		Password:    password,
+		Database:    database,
+		Port:        port,
+		LoadBalance: loadBalance,
+		ITestID:     itestID,
+	})
+}
+
+func NewFromConfig(options Config) (*DB, error) {
+	// Upgrade from New() limitations.
+	if options.Schema == "" {
+		options.Schema = DefaultSchema
+	}
+	if options.SqlEmbedFS == nil {
+		options.SqlEmbedFS = &upgadeFS
+	}
+	if options.DowngradeEmbedFS == nil {
+		options.DowngradeEmbedFS = &downgradeFS
+	}
+	if options.SSLMode == "" {
+		options.SSLMode = "disable"
+	}
+	hosts, username, password, database, port, loadBalance, sslmode := options.Hosts, options.Username, options.Password, options.Database, options.Port, options.LoadBalance, options.SSLMode
+	itest := string(options.ITestID)
 
 	if len(hosts) == 0 {
 		return nil, xerrors.Errorf("no hosts provided")
