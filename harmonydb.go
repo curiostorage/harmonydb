@@ -61,8 +61,8 @@ type Config struct {
 	// Load Balance the connection over multiple nodes
 	LoadBalance bool
 
-	// Use SSL for the connection
-	UseSSL bool
+	// SSL Mode for the connection
+	SSLMode string
 }
 
 // NewFromConfig is a convenience function.
@@ -77,7 +77,7 @@ func NewFromConfig(cfg Config) (*DB, error) {
 		cfg.Database,
 		cfg.Port,
 		cfg.LoadBalance,
-		cfg.UseSSL,
+		cfg.SSLMode,
 		"",
 	)
 }
@@ -99,7 +99,7 @@ func NewFromConfigWithITestID(t *testing.T, id ITestID) (*DB, error) {
 		"yugabyte",
 		"5433",
 		false,
-		false,
+		"",
 		id,
 	)
 	if err != nil {
@@ -114,7 +114,7 @@ func NewFromConfigWithITestID(t *testing.T, id ITestID) (*DB, error) {
 // New is to be called once per binary to establish the pool.
 // log() is for errors. It returns an upgraded database's connection.
 // This entry point serves both production and integration tests, so it's more DI.
-func New(hosts []string, username, password, database, port string, loadBalance bool, useSSL bool, itestID ITestID) (*DB, error) {
+func New(hosts []string, username, password, database, port string, loadBalance bool, sslmode string, itestID ITestID) (*DB, error) {
 	itest := string(itestID)
 
 	if len(hosts) == 0 {
@@ -142,8 +142,10 @@ func New(hosts []string, username, password, database, port string, loadBalance 
 
 	connArgs := []string{}
 
-	if !useSSL {
+	if sslmode == "" {
 		connArgs = append(connArgs, "sslmode=disable")
+	} else {
+		connArgs = append(connArgs, "sslmode="+sslmode)
 	}
 
 	if loadBalance {
