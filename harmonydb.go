@@ -31,12 +31,14 @@ func ITestNewID() ITestID {
 }
 
 type DB struct {
-	pgx       *pgxpool.Pool
-	cfg       *pgxpool.Config
-	schema    string
-	hostnames []string
-	BTFPOnce  sync.Once
-	BTFP      atomic.Uintptr // BeginTransactionFramePointer
+	pgx              *pgxpool.Pool
+	cfg              *pgxpool.Config
+	schema           string
+	hostnames        []string
+	BTFPOnce         sync.Once
+	BTFP             atomic.Uintptr // BeginTransactionFramePointer
+	sqlEmbedFS       embed.FS
+	downgradeEmbedFS embed.FS
 }
 
 var logger = logging.Logger("harmonydb")
@@ -222,7 +224,7 @@ func NewFromConfig(options Config) (*DB, error) {
 		DBMeasures.Errors.M(1)
 	}
 
-	db := DB{cfg: cfg, schema: Schema, hostnames: hosts} // pgx populated in AddStatsAndConnect
+	db := DB{cfg: cfg, schema: Schema, hostnames: hosts, sqlEmbedFS: *options.SqlEmbedFS, downgradeEmbedFS: *options.DowngradeEmbedFS} // pgx populated in AddStatsAndConnect
 	if err := db.addStatsAndConnect(); err != nil {
 		return nil, err
 	}
@@ -359,7 +361,8 @@ retry:
 }
 
 func Init(sql embed.FS, downgrade embed.FS) {
-	upgadeFS, downgradeFS = sql, downgrade
+	upgadeFS = sql
+	downgradeFS = downgrade
 }
 
 var upgadeFS embed.FS
@@ -383,7 +386,7 @@ func (db *DB) DowngradeTo(ctx context.Context, dateNum int) error {
 	}
 	// Ensure all SQL files after that date have a corresponding downgrade file
 	m := map[string]string{}
-	downgrades, err := downgradeFS.ReadDir("downgrade")
+	downgrades, err := db.downgradeEmbedFS.ReadDir("downgrade")
 	if err != nil {
 		return xerrors.Errorf("cannot read downgrade directory: %w", err)
 	}
@@ -398,7 +401,7 @@ func (db *DB) DowngradeTo(ctx context.Context, dateNum int) error {
 		if !ok {
 			allGood = false
 			logger.Errorf("cannot find downgrade file for %s", file)
-			f, err := findFileStartingWith(upgadeFS, file[:8])
+			f, err := findFileStartingWith(db.sqlEmbedFS, file[:8])
 			if err != nil {
 				logger.Errorf("cannot find file starting with %s that relates to downgrade-needed value: %w", file[:8], err)
 				continue
@@ -415,7 +418,7 @@ func (db *DB) DowngradeTo(ctx context.Context, dateNum int) error {
 		return xerrors.New("cannot downgrade to date: some downgrade files are missing")
 	}
 	for _, file := range toDowngrade {
-		if err := applySqlFile(db, downgradeFS, m[file[:8]]); err != nil {
+		if err := applySqlFile(db, db.downgradeEmbedFS, m[file[:8]]); err != nil {
 			return xerrors.Errorf("cannot apply downgrade file for %s. Err: %w", file, err)
 		}
 		_, err := db.Exec(context.Background(), "DELETE FROM base WHERE entry = $1", file[:8])
@@ -452,7 +455,7 @@ func (db *DB) upgrade() error {
 			landed[l.Entry[:8]] = true
 		}
 	}
-	dir, err := upgadeFS.ReadDir("sql")
+	dir, err := db.sqlEmbedFS.ReadDir("sql")
 	if err != nil {
 		logger.Error("Cannot read fs entries: " + err.Error())
 		return err
@@ -472,14 +475,14 @@ func (db *DB) upgrade() error {
 			logger.Debug("DB Schema " + name + " already applied.")
 			continue
 		}
-		file, err := upgadeFS.ReadFile("sql/" + name)
+		file, err := db.sqlEmbedFS.ReadFile("sql/" + name)
 		if err != nil {
 			logger.Error("weird embed file read err")
 			return err
 		}
 
 		logger.Infow("Upgrading", "file", name, "size", len(file))
-		if err := applySqlFile(db, upgadeFS, "sql/"+name); err != nil {
+		if err := applySqlFile(db, db.sqlEmbedFS, "sql/"+name); err != nil {
 			logger.Error("Cannot apply sql file: " + err.Error())
 			return err
 		}
