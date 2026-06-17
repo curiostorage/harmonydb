@@ -5,6 +5,7 @@ go 1.24.0
 toolchain go1.24.1
 
 require (
+	github.com/bytecodealliance/wasmtime-go/v37 v37.0.0
 	github.com/georgysavva/scany/v2 v2.1.4
 	github.com/ipfs/go-log/v2 v2.5.1
 	github.com/jackc/pgerrcode v0.0.0-20240316143900-6e2875d9b438

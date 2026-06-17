@@ -2,8 +2,8 @@ package harmonyquery
 
 import (
 	"context"
-	"embed"
 	"fmt"
+	"io/fs"
 	"maps"
 	"math/rand"
 	"net"
@@ -20,6 +20,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/curiostorage/harmonyquery/pglite"
 	logging "github.com/ipfs/go-log/v2"
 	"github.com/yugabyte/pgx/v5"
 	"github.com/yugabyte/pgx/v5/pgconn"
@@ -43,8 +44,11 @@ type DB struct {
 	hostnames        []string
 	BTFPOnce         sync.Once
 	BTFP             uintptr // A PC only in your stack when you call BeginTransaction()
-	sqlEmbedFS       embed.FS
-	downgradeEmbedFS embed.FS
+	sqlEmbedFS       fs.FS
+	downgradeEmbedFS fs.FS
+	pgliteCleanup    func()
+	pgliteDataDir    string // when set, ITestDeleteAll removes this directory
+	pgliteMode       bool
 }
 
 var logger = logging.Logger("harmonyquery")
@@ -79,11 +83,15 @@ type Config struct {
 	// visible in pg_stat_activity. Defaults to the binary name (os.Args[0]).
 	ApplicationName string
 
-	SqlEmbedFS *embed.FS
+	SqlEmbedFS fs.FS
 
-	DowngradeEmbedFS *embed.FS
+	DowngradeEmbedFS fs.FS
 
 	ITestID ITestID
+
+	// PgliteStoragePath enables embedded PostgreSQL via PGlite when non-blank.
+	// The path is used as the on-disk data directory for the WASM Postgres instance.
+	PgliteStoragePath string
 
 	*PoolConfig // Set all or nothing. We use every value.
 
@@ -206,7 +214,129 @@ func New(hosts []string, username, password, database, port string, loadBalance 
 	})
 }
 
+func newFromConfigPglite(options Config) (*DB, error) {
+	if options.Schema == "" {
+		options.Schema = DefaultSchema
+	}
+	if options.ApplicationName == "" {
+		options.ApplicationName = filepath.Base(os.Args[0])
+	}
+	if options.Database == "" {
+		options.Database = "postgres"
+	}
+	if options.Username == "" {
+		options.Username = "postgres"
+	}
+
+	storagePath := options.PgliteStoragePath
+	pgliteDataDir := ""
+	itest := string(options.ITestID)
+	if itest != "" {
+		pgliteDataDir = filepath.Join(storagePath, "itest_"+itest)
+		storagePath = pgliteDataDir
+		options.Schema = "public"
+	}
+
+	if options.PoolConfig == nil {
+		options.PoolConfig = &PoolConfig{MaxConnections: 1, MinConnections: 1}
+	} else {
+		options.PoolConfig.MaxConnections = 1
+		options.PoolConfig.MinConnections = 1
+	}
+
+	logger.Infof("PGlite connection config: storagePath=%s", storagePath)
+
+	socketDir, cleanup, err := pglite.Start(context.Background(), pglite.Config{
+		DataDir:  storagePath,
+		Database: options.Database,
+		User:     options.Username,
+	})
+	if err != nil {
+		return nil, xerrors.Errorf("start pglite: %w", err)
+	}
+
+	host := url.QueryEscape(socketDir)
+	connString := fmt.Sprintf(
+		"postgresql://%s@/%s?host=%s&sslmode=disable&application_name=%s&search_path=%s",
+		url.QueryEscape(options.Username),
+		url.PathEscape(options.Database),
+		host,
+		url.QueryEscape(options.ApplicationName),
+		url.QueryEscape(options.Schema),
+	)
+
+	cfg, err := pgxpool.ParseConfig(connString)
+	if err != nil {
+		cleanup()
+		return nil, err
+	}
+	cfg.MaxConns = 1
+	cfg.MinConns = 1
+	if options.PoolConfig != nil {
+		if options.PoolConfig.MaxConnectionLifetime > 0 {
+			cfg.MaxConnLifetime = options.PoolConfig.MaxConnectionLifetime
+		}
+		if options.PoolConfig.MaxIdleTime > 0 {
+			cfg.MaxConnIdleTime = options.PoolConfig.MaxIdleTime
+		}
+	}
+
+	db := DB{
+		cfg:              cfg,
+		schema:           options.Schema,
+		pgliteCleanup:    cleanup,
+		pgliteDataDir:    pgliteDataDir,
+		pgliteMode:       true,
+		hostnames:        []string{"pglite"},
+		sqlEmbedFS:       options.SqlEmbedFS,
+		downgradeEmbedFS: options.DowngradeEmbedFS,
+	}
+	if err := db.addStatsAndConnect(); err != nil {
+		cleanup()
+		return nil, err
+	}
+
+	if itest == "" {
+		if err := ensureSchemaExistsPglite(&db, options.Schema); err != nil {
+			db.Close()
+			return nil, err
+		}
+	}
+
+	if err := db.upgrade(); err != nil {
+		db.Close()
+		return nil, err
+	}
+
+	return &db, db.setBTFP()
+}
+
+func ensureSchemaExistsPglite(db *DB, schema string) error {
+	if len(schema) < 5 || !schemaRE.MatchString(schema) {
+		return xerrors.New("schema must be of the form " + schemaREString + "\n Got: " + schema)
+	}
+	_, err := backoffForSerializationError(func() (pgconn.CommandTag, error) {
+		return db.pgx.Exec(context.Background(), "CREATE SCHEMA IF NOT EXISTS "+schema)
+	})
+	return err
+}
+
+// Close shuts down the database pool and embedded PGlite instance when configured.
+func (db *DB) Close() {
+	if db.pgx != nil {
+		db.pgx.Close()
+		db.pgx = nil
+	}
+	if db.pgliteCleanup != nil {
+		db.pgliteCleanup()
+		db.pgliteCleanup = nil
+	}
+}
+
 func NewFromConfig(options Config) (*DB, error) {
+	if options.PgliteStoragePath != "" {
+		return newFromConfigPglite(options)
+	}
 	// Upgrade from New() limitations.
 	if options.Schema == "" {
 		options.Schema = DefaultSchema
@@ -280,8 +410,8 @@ func NewFromConfig(options Config) (*DB, error) {
 		itestBaseDB:      itestBaseDB,
 		itestConn:        conn,
 		hostnames:        hosts,
-		sqlEmbedFS:       *options.SqlEmbedFS,
-		downgradeEmbedFS: *options.DowngradeEmbedFS} // pgx populated in AddStatsAndConnect
+		sqlEmbedFS:       options.SqlEmbedFS,
+		downgradeEmbedFS: options.DowngradeEmbedFS} // pgx populated in AddStatsAndConnect
 	if err := db.addStatsAndConnect(); err != nil {
 		return nil, err
 	}
@@ -342,6 +472,9 @@ func (t tracer) TraceQueryEnd(ctx context.Context, conn *pgx.Conn, data pgx.Trac
 }
 
 func (db *DB) GetRoutableIP() (string, error) {
+	if db.pgliteMode {
+		return "", xerrors.New("GetRoutableIP unavailable in pglite mode")
+	}
 	tx, err := db.pgx.Begin(context.Background())
 	if err != nil {
 		return "", err
@@ -365,9 +498,16 @@ func (db *DB) addStatsAndConnect() error {
 		hostnameToIndex[h] = float64(i)
 	}
 	db.cfg.AfterConnect = func(ctx context.Context, c *pgx.Conn) error {
-		s := db.pgx.Stat()
-		DBMeasures.OpenConnections.M(int64(s.TotalConns()))
-		DBMeasures.WhichHost.Observe(hostnameToIndex[c.Config().Host])
+		if db.pgliteMode && db.schema != "" {
+			if _, err := c.Exec(ctx, "SET search_path TO "+db.schema); err != nil {
+				return err
+			}
+		}
+		if db.pgx != nil {
+			s := db.pgx.Stat()
+			DBMeasures.OpenConnections.M(int64(s.TotalConns()))
+			DBMeasures.WhichHost.Observe(hostnameToIndex[c.Config().Host])
+		}
 
 		//FUTURE place for any connection seasoning
 		return nil
@@ -388,6 +528,14 @@ func (db *DB) addStatsAndConnect() error {
 // ITestDeleteAll will delete everything created for "this" integration test.
 // This must be called at the end of each integration test.
 func (db *DB) ITestDeleteAll() {
+	if db.pgliteDataDir != "" {
+		db.Close()
+		if err := os.RemoveAll(db.pgliteDataDir); err != nil {
+			logger.Warn("warning: unclean pglite itest shutdown: " + err.Error())
+		}
+		return
+	}
+
 	// Template mode uses a dedicated itest database per test.
 	if db.itestBaseDB != "" {
 		itestDB := db.cfg.ConnConfig.Database
@@ -514,7 +662,7 @@ func connectAndUpgrade(connString string, options Config) (*DB, error) {
 	}
 	db := DB{
 		pgx: pool, cfg: cfg, schema: options.Schema,
-		hostnames: options.Hosts, sqlEmbedFS: *options.SqlEmbedFS, downgradeEmbedFS: *options.DowngradeEmbedFS,
+		hostnames: options.Hosts, sqlEmbedFS: options.SqlEmbedFS, downgradeEmbedFS: options.DowngradeEmbedFS,
 	}
 	if err := db.upgrade(); err != nil {
 		db.pgx.Close()
@@ -540,7 +688,7 @@ func (db *DB) DowngradeTo(ctx context.Context, dateNum int) error {
 	}
 	// Ensure all SQL files after that date have a corresponding downgrade file
 	m := map[string]string{}
-	downgrades, err := db.downgradeEmbedFS.ReadDir("downgrade")
+	downgrades, err := fs.ReadDir(db.downgradeEmbedFS, "downgrade")
 	if err != nil {
 		return xerrors.Errorf("cannot read downgrade directory: %w", err)
 	}
@@ -565,7 +713,7 @@ func (db *DB) DowngradeTo(ctx context.Context, dateNum int) error {
 			logger.Errorf("Original file needing downgrade: %s", file[:8], f)
 			continue
 		}
-		if _, err := db.downgradeEmbedFS.ReadFile(downgradeFile); err != nil {
+		if _, err := fs.ReadFile(db.downgradeEmbedFS, downgradeFile); err != nil {
 			allGood = false
 			logger.Errorf("cannot find/read downgrade file for %s. Err: %w", file, err)
 		}
@@ -611,7 +759,7 @@ func (db *DB) upgrade() error {
 			landed[l.Entry[:8]] = true
 		}
 	}
-	dir, err := db.sqlEmbedFS.ReadDir("sql")
+	dir, err := fs.ReadDir(db.sqlEmbedFS, "sql")
 	if err != nil {
 		logger.Error("Cannot read fs entries: " + err.Error())
 		return xerrors.Errorf("cannot read fs entries: %w", err)
@@ -631,7 +779,7 @@ func (db *DB) upgrade() error {
 			logger.Debug("DB Schema " + name + " already applied.")
 			continue
 		}
-		file, err := db.sqlEmbedFS.ReadFile("sql/" + name)
+		file, err := fs.ReadFile(db.sqlEmbedFS, "sql/"+name)
 		if err != nil {
 			logger.Error("weird embed file read err")
 			return xerrors.Errorf("cannot read sql file %s: %w", name, err)
@@ -690,8 +838,8 @@ func parseSQLStatements(sqlContent string) []string {
 	return statements
 }
 
-func applySqlFile(db *DB, fs embed.FS, path string) error {
-	file, err := fs.ReadFile(path)
+func applySqlFile(db *DB, fsys fs.FS, path string) error {
+	file, err := fs.ReadFile(fsys, path)
 	if err != nil {
 		return xerrors.Errorf("cannot read sql file %s: %w", path, err)
 	}
@@ -726,8 +874,8 @@ func applySqlFile(db *DB, fs embed.FS, path string) error {
 	return err
 }
 
-func findFileStartingWith(fs embed.FS, prefix string) (string, error) {
-	entries, err := fs.ReadDir("sql")
+func findFileStartingWith(fsys fs.FS, prefix string) (string, error) {
+	entries, err := fs.ReadDir(fsys, "sql")
 	if err != nil {
 		return "", err
 	}

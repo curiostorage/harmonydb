@@ -1,0 +1,14 @@
+# share/postgresql files for harmonyquery (excludes lib/postgresql/*.so only).
+postgres.bki
+information_schema.sql
+system_views.sql
+system_functions.sql
+system_constraints.sql
+snowball_create.sql
+pg_hba.conf.sample
+postgresql.conf.sample
+pg_ident.conf.sample
+sql_features.txt
+timezonesets/Default
+extension/plpgsql--1.0.sql
+extension/plpgsql.control

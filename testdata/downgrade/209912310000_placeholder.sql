@@ -1,0 +1,1 @@
+-- placeholder downgrade file (unused in pglite tests)

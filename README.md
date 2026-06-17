@@ -5,6 +5,7 @@ A Postgres/Yugabyte adapter in harmony with busy developers. The top few dev mis
 ## Features
 
 - Rolling to secondary database servers on connection failure
+- Optional embedded PostgreSQL via PGlite (`PgliteStoragePath`) for local/single-process use
 - Convenience features for Go + SQL
 - Prevention of SQL injection vulnerabilities
 - Prevents non-transaction calls in a transaction (really hard to debug)
@@ -49,8 +50,8 @@ func main() {
         Port:        "5433",
         LoadBalance: false,
         Schema:      "BobsFishery",
-        UpgradeFS:   &upgradeFS,
-        DowngradeF:  &downgradeFS,
+        SqlEmbedFS:   upgradeFS,
+        DowngradeEmbedFS: downgradeFS,
         SSLMode:     "require",
     })
     if err != nil {
@@ -84,6 +85,30 @@ func main() {
     })
 }
 ```
+
+## Embedded PostgreSQL (PGlite)
+
+When `PgliteStoragePath` is set to a non-blank directory, harmonyquery starts an embedded PostgreSQL 17 instance (PGlite WASI) instead of connecting to Yugabyte over the network. Data is persisted under that directory.
+
+```go
+db, err := harmonyquery.NewFromConfig(harmonyquery.Config{
+    PgliteStoragePath: "/var/lib/myapp/pglite",
+    Schema:            "curio",
+    SqlEmbedFS:        upgradeFS,
+    DowngradeEmbedFS:  downgradeFS,
+})
+if err != nil {
+    panic(err)
+}
+defer db.Close()
+```
+
+Notes:
+
+- PGlite is single-threaded; harmonyquery forces the connection pool to one connection.
+- Unix domain sockets are required (macOS/Linux).
+- `Hosts`, `Port`, and `LoadBalance` are ignored when `PgliteStoragePath` is set.
+- Integration tests (`ITestID`) use an isolated subdirectory under `PgliteStoragePath` instead of Yugabyte template databases.
 
 ## Schema Migrations
 

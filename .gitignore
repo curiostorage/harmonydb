@@ -23,3 +23,9 @@ vendor/
 # OS
 .DS_Store
 
+# PGlite build artifacts and extracted trees
+pglite/tmp/
+pglite/build/out/
+pglite/build/work/
+pglite/build/*.log
+
