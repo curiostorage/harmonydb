@@ -7,7 +7,6 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 
 	"github.com/curiostorage/harmonyquery/pglite"
@@ -381,38 +380,6 @@ func searchPathAfterConnect(schema string) func(context.Context, *pgx.Conn) erro
 	return func(ctx context.Context, c *pgx.Conn) error {
 		_, err := c.Exec(ctx, "SET search_path TO "+schema)
 		return err
-	}
-}
-
-func TestPGlitePostgresVersion(t *testing.T) {
-	tarball := os.Getenv("PGLITE_WASI_TARBALL")
-	if tarball == "" {
-		t.Skip("set PGLITE_WASI_TARBALL to test an alternate WASI tarball")
-	}
-	expect := os.Getenv("PGLITE_EXPECT_VERSION")
-	if expect == "" {
-		expect = "18"
-	}
-
-	t.Setenv("PGLITE_WASI_TARBALL", tarball)
-
-	dataDir := filepath.Join(t.TempDir(), "pgdata")
-	socketDir, cleanup, err := pglite.Start(context.Background(), pglite.Config{DataDir: dataDir})
-	if err != nil {
-		t.Fatalf("Start: %v", err)
-	}
-	defer cleanup()
-
-	pool := openPool(t, "host="+socketDir+" dbname=postgres user=postgres sslmode=disable", "")
-	defer pool.Close()
-
-	var version string
-	if err := pool.QueryRow(context.Background(), `SELECT version()`).Scan(&version); err != nil {
-		t.Fatalf("SELECT version(): %v", err)
-	}
-	t.Logf("postgres version: %s", version)
-	if !strings.Contains(version, expect) {
-		t.Fatalf("expected version to contain %q, got %q", expect, version)
 	}
 }
 

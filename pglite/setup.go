@@ -15,20 +15,6 @@ import (
 // WASIBinary holds the pglite-wasi tar.gz contents, set via //go:embed in embed.go.
 var WASIBinary []byte
 
-func loadWASITarball() ([]byte, error) {
-	if path := os.Getenv("PGLITE_WASI_TARBALL"); path != "" {
-		data, err := os.ReadFile(path)
-		if err != nil {
-			return nil, fmt.Errorf("reading PGLITE_WASI_TARBALL %q: %w", path, err)
-		}
-		return data, nil
-	}
-	if WASIBinary == nil {
-		return nil, fmt.Errorf("pglite WASI binary not available")
-	}
-	return WASIBinary, nil
-}
-
 // setupEnvironment extracts the PGlite WASI binary and sets up the filesystem
 // needed for PostgreSQL to run. Returns the raw pglite.wasi WASM bytes.
 func setupEnvironment(dataDir string) ([]byte, error) {
@@ -36,11 +22,10 @@ func setupEnvironment(dataDir string) ([]byte, error) {
 
 	versionFile := filepath.Join(pgBaseDir, "base", "PG_VERSION")
 	if _, err := os.Stat(versionFile); err != nil {
-		tarball, err := loadWASITarball()
-		if err != nil {
-			return nil, err
+		if WASIBinary == nil {
+			return nil, fmt.Errorf("pglite WASI binary not available")
 		}
-		if err := extractTarGz(dataDir, tarball); err != nil {
+		if err := extractTarGz(dataDir, WASIBinary); err != nil {
 			return nil, fmt.Errorf("extracting pglite-wasi.tar.gz: %w", err)
 		}
 	}
