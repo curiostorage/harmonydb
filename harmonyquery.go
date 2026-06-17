@@ -693,36 +693,91 @@ func (db *DB) upgrade() error {
 	return nil
 }
 
+// scanBlockComment returns whether a block comment is still open after scanning line.
+func scanBlockComment(line string, inBlockComment bool) bool {
+	i := 0
+	for i < len(line) {
+		if inBlockComment {
+			end := strings.Index(line[i:], "*/")
+			if end < 0 {
+				return true
+			}
+			i += end + 2
+			inBlockComment = false
+			continue
+		}
+		start := strings.Index(line[i:], "/*")
+		if start < 0 {
+			return false
+		}
+		i += start + 2
+		inBlockComment = true
+	}
+	return inBlockComment
+}
+
+// stripLineBlockComments removes block comment regions from line and updates inBlockComment.
+func stripLineBlockComments(line string, inBlockComment *bool) string {
+	var b strings.Builder
+	i := 0
+	for i < len(line) {
+		if *inBlockComment {
+			end := strings.Index(line[i:], "*/")
+			if end < 0 {
+				return b.String()
+			}
+			i += end + 2
+			*inBlockComment = false
+			continue
+		}
+		start := strings.Index(line[i:], "/*")
+		if start < 0 {
+			b.WriteString(line[i:])
+			break
+		}
+		b.WriteString(line[i : i+start])
+		i += start + 2
+		*inBlockComment = true
+	}
+	return b.String()
+}
+
 func parseSQLStatements(sqlContent string) []string {
 	var statements []string
 	var currentStatement strings.Builder
 
 	lines := strings.Split(sqlContent, "\n")
 	var inFunction bool
+	var inBlockComment bool
 
 	for _, line := range lines {
-		trimmedLine := strings.TrimSpace(line)
-		if trimmedLine == "" || strings.HasPrefix(trimmedLine, "--") || strings.HasPrefix(trimmedLine, "#") {
-			// Skip empty lines and comments.
+		if !inBlockComment {
+			trimmedLine := strings.TrimSpace(line)
+			if trimmedLine == "" || strings.HasPrefix(trimmedLine, "--") || strings.HasPrefix(trimmedLine, "#") {
+				inBlockComment = scanBlockComment(line, inBlockComment)
+				continue
+			}
+		}
+
+		codeLine := stripLineBlockComments(line, &inBlockComment)
+		trimmedCode := strings.TrimSpace(codeLine)
+		if trimmedCode == "" {
 			continue
 		}
 
-		// Detect function blocks starting or ending.
-		if strings.Contains(trimmedLine, "$$") {
+		if strings.Contains(trimmedCode, "$$") {
 			inFunction = !inFunction
 		}
 
-		// Add the line to the current statement.
-		currentStatement.WriteString(line + "\n")
+		currentStatement.WriteString(codeLine)
+		currentStatement.WriteString("\n")
 
-		// If we're not in a function and the line ends with a semicolon, or we just closed a function block.
-		if (!inFunction && strings.HasSuffix(trimmedLine, ";")) || (strings.Contains(trimmedLine, "$$") && !inFunction) {
+		if (!inFunction && strings.HasSuffix(trimmedCode, ";")) || (strings.Contains(trimmedCode, "$$") && !inFunction) {
 			statements = append(statements, currentStatement.String())
 			currentStatement.Reset()
 		}
 	}
 
-	// Add any remaining statement not followed by a semicolon (should not happen in well-formed SQL but just in case).
 	if currentStatement.Len() > 0 {
 		statements = append(statements, currentStatement.String())
 	}
@@ -734,6 +789,10 @@ func applySqlFile(db *DB, fsys fs.FS, path string) error {
 	file, err := fs.ReadFile(fsys, path)
 	if err != nil {
 		return xerrors.Errorf("cannot read sql file %s: %w", path, err)
+	}
+
+	if db.pgliteMode {
+		return applySqlFileStatements(db, path, string(file))
 	}
 
 	var megaSQL strings.Builder
@@ -764,6 +823,36 @@ func applySqlFile(db *DB, fsys fs.FS, path string) error {
 	}
 
 	return err
+}
+
+func applySqlFileStatements(db *DB, path string, sqlContent string) error {
+	var appliedSQL strings.Builder
+	for _, statement := range parseSQLStatements(sqlContent) {
+		trimmed := strings.TrimSpace(statement)
+		if trimmed == "" {
+			continue
+		}
+		if !strings.HasSuffix(trimmed, ";") {
+			trimmed += ";"
+		}
+
+		_, err := db.Exec(context.Background(), rawStringOnly(trimmed))
+		if err != nil {
+			return xerrors.Errorf("cannot apply sql file: %w", err)
+		}
+		appliedSQL.WriteString(trimmed)
+		appliedSQL.WriteString("\n")
+	}
+
+	if appliedSQL.Len() == 0 {
+		return nil
+	}
+
+	if ITestUpgradeFunc != nil {
+		ITestUpgradeFunc(db.pgx, path[:8], appliedSQL.String())
+	}
+
+	return nil
 }
 
 func findFileStartingWith(fsys fs.FS, prefix string) (string, error) {
