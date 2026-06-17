@@ -6,6 +6,8 @@ import (
 	"io/fs"
 	"path/filepath"
 	"testing"
+
+	"github.com/curiostorage/harmonyquery/pglite"
 )
 
 //go:embed testdata
@@ -24,7 +26,7 @@ func init() {
 func TestHarmonyqueryPglite(t *testing.T) {
 	dataDir := filepath.Join(t.TempDir(), "pgdata")
 	db, err := NewFromConfig(Config{
-		PgliteStoragePath: dataDir,
+		Pglite:           pglite.UseInternalDB(dataDir),
 		Schema:            "curio",
 		SqlEmbedFS:        pgliteTestMigrations,
 		DowngradeEmbedFS:  pgliteTestMigrations,
@@ -98,7 +100,7 @@ func TestHarmonyqueryPglite(t *testing.T) {
 func TestHarmonyqueryPgliteITest(t *testing.T) {
 	baseDir := filepath.Join(t.TempDir(), "pgbase")
 	db, err := NewFromConfig(Config{
-		PgliteStoragePath: baseDir,
+		Pglite:           pglite.UseInternalDB(baseDir),
 		Schema:            "public",
 		SqlEmbedFS:        pgliteTestMigrations,
 		DowngradeEmbedFS:  pgliteTestMigrations,

@@ -4,12 +4,14 @@ import (
 	"context"
 	"path/filepath"
 	"testing"
+
+	"github.com/curiostorage/harmonyquery/pglite"
 )
 
 func TestHarmonyqueryPgliteSerialInserts(t *testing.T) {
 	dataDir := filepath.Join(t.TempDir(), "pgdata")
 	db, err := NewFromConfig(Config{
-		PgliteStoragePath: dataDir,
+		Pglite:           pglite.UseInternalDB(dataDir),
 		Schema:            "curio",
 		SqlEmbedFS:        pgliteTestMigrations,
 		DowngradeEmbedFS:  pgliteTestMigrations,

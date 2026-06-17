@@ -20,7 +20,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/curiostorage/harmonyquery/pglite"
 	logging "github.com/ipfs/go-log/v2"
 	"github.com/yugabyte/pgx/v5"
 	"github.com/yugabyte/pgx/v5/pgconn"
@@ -89,9 +88,9 @@ type Config struct {
 
 	ITestID ITestID
 
-	// PgliteStoragePath enables embedded PostgreSQL via PGlite when non-blank.
-	// The path is used as the on-disk data directory for the WASM Postgres instance.
-	PgliteStoragePath string
+	// Pglite selects an embedded PostgreSQL backend instead of Yugabyte over the network.
+	// Pass pglite.UseInternalDB(path) from github.com/curiostorage/harmonyquery/pglite.
+	Pglite Pglite
 
 	*PoolConfig // Set all or nothing. We use every value.
 
@@ -214,113 +213,6 @@ func New(hosts []string, username, password, database, port string, loadBalance 
 	})
 }
 
-func newFromConfigPglite(options Config) (*DB, error) {
-	if options.Schema == "" {
-		options.Schema = DefaultSchema
-	}
-	if options.ApplicationName == "" {
-		options.ApplicationName = filepath.Base(os.Args[0])
-	}
-	if options.Database == "" {
-		options.Database = "postgres"
-	}
-	if options.Username == "" {
-		options.Username = "postgres"
-	}
-
-	storagePath := options.PgliteStoragePath
-	pgliteDataDir := ""
-	itest := string(options.ITestID)
-	if itest != "" {
-		pgliteDataDir = filepath.Join(storagePath, "itest_"+itest)
-		storagePath = pgliteDataDir
-		options.Schema = "public"
-	}
-
-	if options.PoolConfig == nil {
-		options.PoolConfig = &PoolConfig{MaxConnections: 1, MinConnections: 1}
-	} else {
-		options.PoolConfig.MaxConnections = 1
-		options.PoolConfig.MinConnections = 1
-	}
-
-	logger.Infof("PGlite connection config: storagePath=%s", storagePath)
-
-	socketDir, cleanup, err := pglite.Start(context.Background(), pglite.Config{
-		DataDir:  storagePath,
-		Database: options.Database,
-		User:     options.Username,
-	})
-	if err != nil {
-		return nil, xerrors.Errorf("start pglite: %w", err)
-	}
-
-	host := url.QueryEscape(socketDir)
-	connString := fmt.Sprintf(
-		"postgresql://%s@/%s?host=%s&sslmode=disable&application_name=%s&search_path=%s",
-		url.QueryEscape(options.Username),
-		url.PathEscape(options.Database),
-		host,
-		url.QueryEscape(options.ApplicationName),
-		url.QueryEscape(options.Schema),
-	)
-
-	cfg, err := pgxpool.ParseConfig(connString)
-	if err != nil {
-		cleanup()
-		return nil, err
-	}
-	cfg.MaxConns = 1
-	cfg.MinConns = 1
-	if options.PoolConfig != nil {
-		if options.PoolConfig.MaxConnectionLifetime > 0 {
-			cfg.MaxConnLifetime = options.PoolConfig.MaxConnectionLifetime
-		}
-		if options.PoolConfig.MaxIdleTime > 0 {
-			cfg.MaxConnIdleTime = options.PoolConfig.MaxIdleTime
-		}
-	}
-
-	db := DB{
-		cfg:              cfg,
-		schema:           options.Schema,
-		pgliteCleanup:    cleanup,
-		pgliteDataDir:    pgliteDataDir,
-		pgliteMode:       true,
-		hostnames:        []string{"pglite"},
-		sqlEmbedFS:       options.SqlEmbedFS,
-		downgradeEmbedFS: options.DowngradeEmbedFS,
-	}
-	if err := db.addStatsAndConnect(); err != nil {
-		cleanup()
-		return nil, err
-	}
-
-	if itest == "" {
-		if err := ensureSchemaExistsPglite(&db, options.Schema); err != nil {
-			db.Close()
-			return nil, err
-		}
-	}
-
-	if err := db.upgrade(); err != nil {
-		db.Close()
-		return nil, err
-	}
-
-	return &db, db.setBTFP()
-}
-
-func ensureSchemaExistsPglite(db *DB, schema string) error {
-	if len(schema) < 5 || !schemaRE.MatchString(schema) {
-		return xerrors.New("schema must be of the form " + schemaREString + "\n Got: " + schema)
-	}
-	_, err := backoffForSerializationError(func() (pgconn.CommandTag, error) {
-		return db.pgx.Exec(context.Background(), "CREATE SCHEMA IF NOT EXISTS "+schema)
-	})
-	return err
-}
-
 // Close shuts down the database pool and embedded PGlite instance when configured.
 func (db *DB) Close() {
 	if db.pgx != nil {
@@ -334,7 +226,7 @@ func (db *DB) Close() {
 }
 
 func NewFromConfig(options Config) (*DB, error) {
-	if options.PgliteStoragePath != "" {
+	if options.Pglite != nil {
 		return newFromConfigPglite(options)
 	}
 	// Upgrade from New() limitations.

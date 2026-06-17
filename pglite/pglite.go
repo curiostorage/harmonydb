@@ -1,6 +1,13 @@
 // Package pglite embeds PostgreSQL 17 via the PGlite WASI build and exposes it
 // through a Unix-socket wire-protocol bridge compatible with pgx.
 //
+// Use with harmonyquery:
+//
+//	db, err := harmonyquery.NewFromConfig(harmonyquery.Config{
+//	    Pglite: pglite.UseInternalDB("/var/lib/myapp/pglite"),
+//	    ...
+//	})
+//
 // The runtime uses wasmtime-go because this PGlite WASI artifact requires
 // overlapping WASI directory preopens that are not handled correctly by wazero.
 package pglite

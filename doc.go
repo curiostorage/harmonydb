@@ -4,7 +4,7 @@
 # Features
 
 	Rolling to secondary database servers on connection failure
-	Optional embedded PostgreSQL via PGlite when Config.PgliteStoragePath is set
+	Optional embedded PostgreSQL via PGlite (harmonyquery.Config.Pglite, e.g. pglite.UseInternalDB)
 	Convenience features for Go + SQL
 	Prevention of SQL injection vulnerabilities
 	Monitors behavior via Prometheus stats and logging of errors.
