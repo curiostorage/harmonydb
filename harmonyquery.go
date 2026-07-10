@@ -38,6 +38,7 @@ type DB struct {
 	pgx              *pgxpool.Pool
 	cfg              *pgxpool.Config
 	schema           string
+	readOnly         bool
 	itestBaseDB      string     // when set, ITestDeleteAll uses DROP DATABASE
 	itestConn        connParams // when itestBaseDB set, used to connect back for DROP
 	hostnames        []string
@@ -68,6 +69,10 @@ type Config struct {
 
 	// Load Balance the connection over multiple nodes
 	LoadBalance bool
+
+	// ReadOnly skips schema creation, migrations, and other startup writes.
+	// Also settable via HARMONYQUERY_READONLY=true (override DefaultReadOnlyEnv in init).
+	ReadOnly bool
 
 	// SSL Mode for the connection
 	SSLMode string
@@ -106,6 +111,20 @@ func envElse(env, els string) string {
 }
 
 var DefaultHostEnv = "HARMONYQUERY_HOSTS"
+
+// DefaultReadOnlyEnv names the env var ReadOnlyFromEnv consults.
+var DefaultReadOnlyEnv = "HARMONYQUERY_READONLY"
+
+// ReadOnlyFromEnv reports whether read-only DB mode is enabled via env.
+func ReadOnlyFromEnv() bool {
+	v := strings.ToLower(strings.TrimSpace(os.Getenv(DefaultReadOnlyEnv)))
+	return v == "true" || v == "1" || v == "yes"
+}
+
+// ReadOnly reports whether this connection was opened in read-only mode.
+func (db *DB) ReadOnly() bool {
+	return db.readOnly
+}
 
 func NewFromConfigWithITestID(t *testing.T, id ITestID) (*DB, error) {
 	logger.Infof("%s: %s", DefaultHostEnv, os.Getenv(DefaultHostEnv))
@@ -223,8 +242,10 @@ func NewFromConfig(options Config) (*DB, error) {
 		return nil, xerrors.Errorf("no hosts provided")
 	}
 
+	readOnly := options.ReadOnly || ReadOnlyFromEnv()
+
 	// Debug: Log which path we're taking
-	logger.Infof("Yugabyte connection config: loadBalance=%v, hosts=%v, port=%s", loadBalance, hosts, port)
+	logger.Infof("Yugabyte connection config: loadBalance=%v, hosts=%v, port=%s, readonly=%v", loadBalance, hosts, port, readOnly)
 
 	conn := buildConnParams(options, hosts, port)
 	connString := conn.connString(database)
@@ -261,6 +282,10 @@ func NewFromConfig(options Config) (*DB, error) {
 			}
 			connString = conn.connString(database)
 		}
+	} else if readOnly {
+		if err := verifySchemaExists(conn, options.Schema, database); err != nil {
+			return nil, err
+		}
 	} else if err := ensureSchemaExists(conn, options.Schema, database); err != nil {
 		return nil, err
 	}
@@ -277,6 +302,7 @@ func NewFromConfig(options Config) (*DB, error) {
 	db := DB{
 		cfg:              cfg,
 		schema:           options.Schema,
+		readOnly:         readOnly,
 		itestBaseDB:      itestBaseDB,
 		itestConn:        conn,
 		hostnames:        hosts,
@@ -437,6 +463,25 @@ func ensureSchemaExists(conn connParams, schema, database string) error {
 	})
 }
 
+func verifySchemaExists(conn connParams, schema, database string) error {
+	if len(schema) < 5 || !schemaRE.MatchString(schema) {
+		return xerrors.New("schema must be of the form " + schemaREString + "\n Got: " + schema)
+	}
+	var exists bool
+	err := conn.runWithConn(database, 3*time.Second, func(p *pgx.Conn) error {
+		return p.QueryRow(context.Background(),
+			"SELECT EXISTS (SELECT 1 FROM information_schema.schemata WHERE schema_name = $1)",
+			schema).Scan(&exists)
+	})
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return xerrors.Errorf("readonly mode: schema %q does not exist", schema)
+	}
+	return nil
+}
+
 func ensureTemplateDatabase(conn connParams, baseDB string, options Config) error {
 	itestTemplateOnce.Do(func() {
 		var exists bool
@@ -585,6 +630,11 @@ func (db *DB) DowngradeTo(ctx context.Context, dateNum int) error {
 	return nil
 }
 func (db *DB) upgrade() error {
+	if db.readOnly {
+		logger.Info("readonly database mode: skipping schema upgrade")
+		return nil
+	}
+
 	// Does the version table exist? if not, make it.
 	// NOTE: This cannot change except via the next sql file.
 	_, err := db.Exec(context.Background(), `CREATE TABLE IF NOT EXISTS base (
