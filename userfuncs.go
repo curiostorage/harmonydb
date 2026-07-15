@@ -190,6 +190,7 @@ func (db *DB) usedInTransaction() bool {
 
 type TransactionOptions struct {
 	RetrySerializationError bool
+	ReadOnly                bool
 }
 
 type TransactionOption func(*TransactionOptions)
@@ -197,6 +198,14 @@ type TransactionOption func(*TransactionOptions)
 func OptionRetry() TransactionOption {
 	return func(o *TransactionOptions) {
 		o.RetrySerializationError = true
+	}
+}
+
+// OptionReadOnly begins the transaction in PostgreSQL/YSQL READ ONLY mode
+// (pgx AccessMode=ReadOnly), so writes are rejected by the database.
+func OptionReadOnly() TransactionOption {
+	return func(o *TransactionOptions) {
+		o.ReadOnly = true
 	}
 }
 
@@ -221,20 +230,24 @@ func (db *DB) BeginTransaction(ctx context.Context, f func(*Tx) (commit bool, er
 
 	if opts.RetrySerializationError {
 		return backoffForSerializationError(func() (bool, error) {
-			return db.transactionInner(ctx, f)
+			return db.transactionInner(ctx, f, opts)
 		})
 	}
-	return db.transactionInner(ctx, f)
+	return db.transactionInner(ctx, f, opts)
 }
 
 //go:noinline
-func (db *DB) transactionInner(ctx context.Context, f func(*Tx) (commit bool, err error)) (didCommit bool, retErr error) {
+func (db *DB) transactionInner(ctx context.Context, f func(*Tx) (commit bool, err error), opts TransactionOptions) (didCommit bool, retErr error) {
 	var tx = &Tx{ctx: ctx}
 	var started bool
 
 	// BEGIN as late as possible. This reduces serialization errors and enables testing the BTFP mechanism.
 	tx.tx = func() (pgx.Tx, error) {
-		ptx, err := db.pgx.BeginTx(ctx, pgx.TxOptions{})
+		txOpts := pgx.TxOptions{}
+		if opts.ReadOnly {
+			txOpts.AccessMode = pgx.ReadOnly
+		}
+		ptx, err := db.pgx.BeginTx(ctx, txOpts)
 		started = true
 		tx.tx = func() (pgx.Tx, error) {
 			return ptx, errFilter(err)
